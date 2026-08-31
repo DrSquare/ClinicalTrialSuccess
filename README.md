@@ -78,6 +78,8 @@ The command writes:
   ClinicalTrials.gov.
 - `phase_labels.csv`: CDP phase labels and evidence.
 - `success_rates.csv`: P1SR, P2SR, P3SR, and OSR.
+- `drug_standardization_report.csv`: review queue for curated synonym gaps and
+  high-fragmentation drug names.
 - `summary.json`: source URLs, exact queries, counts, hashes, rates, and method
   notes.
 - `clinicaltrials_studies_<start>_<end>.json`: raw ClinicalTrials.gov records
@@ -87,18 +89,25 @@ The command writes:
 
 ## Optional Inputs
 
-Use a synonym CSV to improve drug-name merging:
+Use a version 1 synonym CSV to improve drug-name merging. Start from
+`data/synonyms.template.csv`; the required columns are `schema_version`, `alias`,
+`canonical`, `source`, and `reviewed_by`.
 
 ```csv
-alias,canonical
-NEOD001,birtamimab
+schema_version,alias,canonical,entity_type,source,reviewed_by,reviewed_at,notes
+1,NEOD001,birtamimab,drug,manual_registry_review,reviewer@example.com,2026-08-31,development code to INN
 ```
 
-Use an approvals CSV for condition-specific Phase 3 success labels:
+Use a version 1 approvals CSV for condition-specific Phase 3 success labels.
+Start from `data/approvals.template.csv`; in the default strict mode the
+required columns are `schema_version`, `drug`, `approval_date`, `condition`,
+`source`, and `reviewed_by`. Optional `canonical_drug` and
+`canonical_condition` columns override source text for matching while preserving
+the original fields.
 
 ```csv
-drug,approval_date,condition,application_number,source
-alemtuzumab,2014-11-14,multiple sclerosis,BLA103948,manual_fda
+schema_version,drug,canonical_drug,approval_date,condition,canonical_condition,condition_id,application_number,submission_type,submission_class_code,source,reviewed_by,reviewed_at,notes
+1,alemtuzumab,alemtuzumab,2014-11-14,multiple sclerosis,multiple sclerosis,,BLA103948,SUPPL,EFFICACY,manual_fda_label_review,reviewer@example.com,2026-08-31,condition-specific FDA label review
 ```
 
 Then run:
@@ -129,7 +138,8 @@ openFDA approval data does not include indication-level matching in the API
 records used here. The default CDP output therefore treats openFDA as drug-level
 evidence only and lets a user-supplied approvals CSV supply condition-specific
 approval labels. Use `--approval-match drug` only when a molecular-entity-level
-sensitivity analysis is acceptable.
+sensitivity analysis is acceptable. `summary.json` records the schema version,
+path, and SHA-256 hash for both optional CSV inputs when provided.
 
 ## Review Notes
 

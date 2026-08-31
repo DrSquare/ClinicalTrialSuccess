@@ -1,16 +1,26 @@
 from __future__ import annotations
 
+import io
+import json
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from clinical_trial_success import (
     ApprovalRecord,
     TrialRecord,
+    build_drug_standardization_report,
     calculate_rates,
     flatten_studies,
     label_all_cdps,
+    load_approvals_csv,
+    load_synonyms,
+    main,
     normalize_drug,
     normalize_phase,
+    write_drug_standardization_report,
 )
 
 
@@ -161,6 +171,242 @@ class ClinicalTrialSuccessTests(unittest.TestCase):
         )
         sensitivity_p3 = [label for label in sensitivity if label.phase == 3][0]
         self.assertEqual(sensitivity_p3.label, "success")
+
+    def test_approval_csv_requires_condition_in_strict_mode(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "approvals.csv"
+            path.write_text(
+                "schema_version,drug,approval_date,source,reviewed_by\n"
+                "1,Indicamab,2024-01-02,manual_fda_label_review,qa\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing required columns.*condition"):
+                load_approvals_csv(str(path), require_condition=True)
+
+    def test_approval_csv_uses_canonical_drug_and_condition(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "approvals.csv"
+            path.write_text(
+                "schema_version,drug,canonical_drug,approval_date,condition,"
+                "canonical_condition,source,reviewed_by\n"
+                "1,Brand X,Genericx,2024-01-02,NSCLC,"
+                "non-small cell lung cancer,manual_fda_label_review,qa\n",
+                encoding="utf-8",
+            )
+
+            approvals = load_approvals_csv(str(path), require_condition=True)
+
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0].drug_key, "genericx")
+        self.assertEqual(approvals[0].condition_key, "non-small cell lung cancer")
+        self.assertEqual(approvals[0].source, "manual_fda_label_review")
+
+    def test_approval_csv_rejects_duplicate_canonical_approval_dates(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "approvals.csv"
+            path.write_text(
+                "schema_version,drug,canonical_drug,approval_date,condition,"
+                "canonical_condition,source,reviewed_by\n"
+                "1,Brand X,Genericx,2024-01-02,NSCLC,"
+                "non-small cell lung cancer,manual_fda_label_review,qa\n"
+                "1,Genericx,,2024-01-02,non-small cell lung cancer,,"
+                "manual_fda_label_review,qa\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "duplicates canonical drug-condition"):
+                load_approvals_csv(str(path), require_condition=True)
+
+    def test_synonyms_csv_accepts_versioned_review_metadata(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "synonyms.csv"
+            path.write_text(
+                "schema_version,alias,canonical,entity_type,source,reviewed_by,"
+                "reviewed_at,notes\n"
+                "1,NEOD001,birtamimab,drug,manual_registry_review,qa,"
+                "2026-08-31,code-name mapping\n",
+                encoding="utf-8",
+            )
+
+            synonyms = load_synonyms(str(path))
+
+        self.assertEqual(synonyms["neod001"], "birtamimab")
+
+    def test_synonyms_csv_rejects_conflicting_aliases(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "synonyms.csv"
+            path.write_text(
+                "schema_version,alias,canonical,source,reviewed_by\n"
+                "1,NEOD001,birtamimab,manual_registry_review,qa\n"
+                "1,NEOD001,othermab,manual_registry_review,qa\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "earlier row maps it"):
+                load_synonyms(str(path))
+
+    def test_drug_standardization_report_marks_curated_and_unresolved_rows(self) -> None:
+        records = [
+            TrialRecord(
+                nct_id="NCT00000101",
+                brief_title="Curated alias",
+                drug="NEOD001",
+                drug_key="birtamimab",
+                condition="Amyloidosis",
+                condition_key="amyloidosis",
+                phase=2,
+                intervention_type="DRUG",
+                overall_status="COMPLETED",
+                start_date=date(2022, 1, 1),
+                completion_date=None,
+            ),
+            TrialRecord(
+                nct_id="NCT00000102",
+                brief_title="Curated canonical",
+                drug="birtamimab",
+                drug_key="birtamimab",
+                condition="Amyloidosis",
+                condition_key="amyloidosis",
+                phase=3,
+                intervention_type="DRUG",
+                overall_status="RECRUITING",
+                start_date=date(2024, 1, 1),
+                completion_date=None,
+            ),
+            TrialRecord(
+                nct_id="NCT00000103",
+                brief_title="Unresolved spelling",
+                drug="Examplex low dose",
+                drug_key="examplex",
+                condition="Pain",
+                condition_key="pain",
+                phase=1,
+                intervention_type="DRUG",
+                overall_status="COMPLETED",
+                start_date=date(2022, 1, 1),
+                completion_date=None,
+            ),
+            TrialRecord(
+                nct_id="NCT00000104",
+                brief_title="Unresolved spelling",
+                drug="Examplex injection",
+                drug_key="examplex",
+                condition="Pain",
+                condition_key="pain",
+                phase=2,
+                intervention_type="DRUG",
+                overall_status="RECRUITING",
+                start_date=date(2024, 1, 1),
+                completion_date=None,
+            ),
+        ]
+
+        rows = build_drug_standardization_report(records, {"neod001": "birtamimab"})
+        by_key = {row.drug_key: row for row in rows}
+
+        self.assertEqual(by_key["birtamimab"].needs_review, "false")
+        self.assertEqual(by_key["examplex"].needs_review, "true")
+
+        with TemporaryDirectory() as tmp_dir:
+            report_path = Path(tmp_dir) / "drug_standardization_report.csv"
+            write_drug_standardization_report(report_path, rows)
+            report_text = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("drug_key,trial_records,cdps", report_text)
+        self.assertIn("examplex", report_text)
+
+    def test_cli_records_curated_input_hashes_and_standardization_report(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            studies_path = tmp_path / "studies.json"
+            approvals_path = tmp_path / "approvals.csv"
+            synonyms_path = tmp_path / "synonyms.csv"
+            output_dir = tmp_path / "output"
+            studies_path.write_text(
+                json.dumps(
+                    {
+                        "studies": [
+                            {
+                                "protocolSection": {
+                                    "identificationModule": {
+                                        "nctId": "NCT00000105",
+                                        "briefTitle": "Brand X NSCLC",
+                                    },
+                                    "statusModule": {
+                                        "overallStatus": "COMPLETED",
+                                        "startDateStruct": {"date": "2022-01-01"},
+                                        "completionDateStruct": {"date": "2023-01-01"},
+                                    },
+                                    "conditionsModule": {
+                                        "conditions": ["non-small cell lung cancer"]
+                                    },
+                                    "designModule": {
+                                        "studyType": "INTERVENTIONAL",
+                                        "phases": ["PHASE3"],
+                                    },
+                                    "armsInterventionsModule": {
+                                        "armGroups": [
+                                            {"label": "Brand X", "type": "EXPERIMENTAL"}
+                                        ],
+                                        "interventions": [
+                                            {
+                                                "type": "DRUG",
+                                                "name": "Brand X",
+                                                "armGroupLabels": ["Brand X"],
+                                                "otherNames": ["Genericx"],
+                                            }
+                                        ],
+                                    },
+                                }
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approvals_path.write_text(
+                "schema_version,drug,canonical_drug,approval_date,condition,"
+                "canonical_condition,source,reviewed_by\n"
+                "1,Brand X,Genericx,2024-01-02,NSCLC,"
+                "non-small cell lung cancer,manual_fda_label_review,qa\n",
+                encoding="utf-8",
+            )
+            synonyms_path.write_text(
+                "schema_version,alias,canonical,source,reviewed_by\n"
+                "1,Brand X,Genericx,manual_registry_review,qa\n",
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                result = main(
+                    [
+                        "--start-date",
+                        "2021-08-30",
+                        "--end-date",
+                        "2026-08-30",
+                        "--studies-json",
+                        str(studies_path),
+                        "--no-openfda",
+                        "--approvals-csv",
+                        str(approvals_path),
+                        "--synonyms-csv",
+                        str(synonyms_path),
+                        "--output-dir",
+                        str(output_dir),
+                    ]
+                )
+
+            summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result, 0)
+        self.assertEqual(summary["analysis"]["approvals_schema_version"], "1")
+        self.assertEqual(summary["analysis"]["synonyms_schema_version"], "1")
+        self.assertRegex(summary["artifacts"]["approvals_csv_sha256"], r"^[a-f0-9]{64}$")
+        self.assertRegex(summary["artifacts"]["synonyms_csv_sha256"], r"^[a-f0-9]{64}$")
+        self.assertEqual(summary["drug_standardization_report_rows"], 1)
+        p3_rate = {row["metric"]: row for row in summary["rates"]}["P3SR"]
+        self.assertEqual(p3_rate["rate"], 1.0)
 
     def test_future_discontinued_completion_is_not_failure(self) -> None:
         records = [

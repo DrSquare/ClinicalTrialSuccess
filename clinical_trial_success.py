@@ -33,6 +33,8 @@ from typing import Any, Iterable
 
 CLINICALTRIALS_URL = "https://clinicaltrials.gov/api/v2/studies"
 OPENFDA_DRUGSFDA_URL = "https://api.fda.gov/drug/drugsfda.json"
+APPROVALS_SCHEMA_VERSION = "1"
+SYNONYMS_SCHEMA_VERSION = "1"
 
 DRUG_INTERVENTION_TYPES = {"DRUG", "BIOLOGICAL", "GENETIC"}
 DISCONTINUED_STATUSES = {
@@ -97,6 +99,20 @@ GENERIC_OTHER_NAME_RE = re.compile(
     r"active treatment|test product|drug product)$",
     re.IGNORECASE,
 )
+APPROVALS_REQUIRED_COLUMNS = {
+    "schema_version",
+    "drug",
+    "approval_date",
+    "source",
+    "reviewed_by",
+}
+SYNONYMS_REQUIRED_COLUMNS = {
+    "schema_version",
+    "alias",
+    "canonical",
+    "source",
+    "reviewed_by",
+}
 
 
 @dataclass(frozen=True)
@@ -161,6 +177,18 @@ class RateRow:
     rate: float | str
 
 
+@dataclass(frozen=True)
+class DrugStandardizationReportRow:
+    drug_key: str
+    trial_records: int
+    cdps: int
+    unique_surface_forms: int
+    unique_source_keys: int
+    curated_aliases: str
+    sample_surface_forms: str
+    needs_review: str
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -191,7 +219,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         default="output",
-        help="Directory for trial_records.csv, phase_labels.csv, success_rates.csv, summary.json.",
+        help=(
+            "Directory for trial_records.csv, phase_labels.csv, success_rates.csv, "
+            "drug_standardization_report.csv, summary.json."
+        ),
     )
     parser.add_argument(
         "--page-size",
@@ -230,13 +261,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--approvals-csv",
         help=(
-            "Optional CSV with drug, approval_date, and optional condition/source/"
-            "application_number columns. These records are added to openFDA records."
+            "Optional version 1 CSV with condition-specific approval ground truth. "
+            "Required columns include schema_version, drug, approval_date, condition, "
+            "source, and reviewed_by in the default condition-matching mode."
         ),
     )
     parser.add_argument(
         "--synonyms-csv",
-        help="Optional CSV with alias,canonical columns for drug-name normalization.",
+        help=(
+            "Optional version 1 CSV with schema_version, alias, canonical, source, "
+            "and reviewed_by columns for drug-name normalization."
+        ),
     )
     parser.add_argument(
         "--no-openfda",
@@ -331,21 +366,87 @@ def normalize_text(value: str) -> str:
     return value.strip(" -_'")
 
 
+def csv_value(row: dict[str, Any], column: str, default: str = "") -> str:
+    return str(row.get(column, default) or "").strip()
+
+
+def csv_row_has_value(row: dict[str, Any]) -> bool:
+    return any(str(value or "").strip() for value in row.values())
+
+
+def require_csv_columns(path: str, fieldnames: Iterable[str] | None, required: set[str]) -> None:
+    actual = set(fieldnames or [])
+    missing = required - actual
+    if missing:
+        raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
+
+
+def validate_schema_version(path: str, row_number: int, value: str, expected: str) -> None:
+    version = value.strip()
+    if version != expected:
+        raise ValueError(
+            f"{path} row {row_number} has schema_version {version!r}; expected {expected!r}"
+        )
+
+
+def parse_required_date(path: str, row_number: int, column: str, value: str) -> date:
+    try:
+        parsed = parse_partial_date(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{path} row {row_number} has invalid {column}: {value!r}"
+        ) from exc
+    if not parsed:
+        raise ValueError(f"{path} row {row_number} is missing required {column}")
+    return parsed
+
+
+def validate_optional_date(path: str, row_number: int, column: str, value: str) -> None:
+    if value:
+        parse_required_date(path, row_number, column, value)
+
+
 def load_synonyms(path: str | None) -> dict[str, str]:
     if not path:
         return {}
     synonyms: dict[str, str] = {}
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {"alias", "canonical"}
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
-        for row in reader:
-            alias = normalize_text(row.get("alias", ""))
-            canonical = normalize_text(row.get("canonical", ""))
-            if alias and canonical:
-                synonyms[alias] = canonical
+        require_csv_columns(path, reader.fieldnames, SYNONYMS_REQUIRED_COLUMNS)
+        for row_number, row in enumerate(reader, start=2):
+            if not csv_row_has_value(row):
+                continue
+            validate_schema_version(
+                path,
+                row_number,
+                csv_value(row, "schema_version"),
+                SYNONYMS_SCHEMA_VERSION,
+            )
+            validate_optional_date(path, row_number, "reviewed_at", csv_value(row, "reviewed_at"))
+            entity_type = csv_value(row, "entity_type").lower()
+            if entity_type and entity_type != "drug":
+                raise ValueError(
+                    f"{path} row {row_number} has entity_type {entity_type!r}; expected 'drug'"
+                )
+            alias_raw = csv_value(row, "alias")
+            canonical_raw = csv_value(row, "canonical")
+            if not alias_raw or not canonical_raw:
+                raise ValueError(
+                    f"{path} row {row_number} must include non-empty alias and canonical values"
+                )
+            if not csv_value(row, "source") or not csv_value(row, "reviewed_by"):
+                raise ValueError(
+                    f"{path} row {row_number} must include source and reviewed_by values"
+                )
+            alias = normalize_text(alias_raw)
+            canonical = normalize_text(canonical_raw)
+            existing = synonyms.get(alias)
+            if existing and existing != canonical:
+                raise ValueError(
+                    f"{path} row {row_number} maps alias {alias_raw!r} to "
+                    f"{canonical_raw!r}, but an earlier row maps it to {existing!r}"
+                )
+            synonyms[alias] = canonical
     return synonyms
 
 
@@ -772,33 +873,75 @@ def fetch_openfda_approvals(
 def load_approvals_csv(
     path: str | None,
     synonyms: dict[str, str] | None = None,
+    require_condition: bool = True,
 ) -> list[ApprovalRecord]:
     if not path:
         return []
     approvals: list[ApprovalRecord] = []
+    seen: dict[tuple[str, str, date], int] = {}
     with Path(path).open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        required = {"drug", "approval_date"}
-        missing = required - set(reader.fieldnames or [])
-        if missing:
-            raise ValueError(f"{path} is missing required columns: {sorted(missing)}")
-        for row in reader:
-            drug = str(row.get("drug", "")).strip()
-            approval_date = parse_partial_date(row.get("approval_date"))
-            if not drug or not approval_date:
+        required = set(APPROVALS_REQUIRED_COLUMNS)
+        if require_condition:
+            required.add("condition")
+        require_csv_columns(path, reader.fieldnames, required)
+        for row_number, row in enumerate(reader, start=2):
+            if not csv_row_has_value(row):
                 continue
-            condition = str(row.get("condition", "")).strip()
+            validate_schema_version(
+                path,
+                row_number,
+                csv_value(row, "schema_version"),
+                APPROVALS_SCHEMA_VERSION,
+            )
+            validate_optional_date(path, row_number, "reviewed_at", csv_value(row, "reviewed_at"))
+            drug = csv_value(row, "drug")
+            canonical_drug = csv_value(row, "canonical_drug") or drug
+            condition = csv_value(row, "condition")
+            canonical_condition = csv_value(row, "canonical_condition") or condition
+            if not drug:
+                raise ValueError(f"{path} row {row_number} is missing required drug")
+            if require_condition and not condition:
+                raise ValueError(
+                    f"{path} row {row_number} is missing condition; strict CDP "
+                    "approval matching requires indication-specific approvals"
+                )
+            if not csv_value(row, "source") or not csv_value(row, "reviewed_by"):
+                raise ValueError(
+                    f"{path} row {row_number} must include source and reviewed_by values"
+                )
+            approval_date = parse_required_date(
+                path,
+                row_number,
+                "approval_date",
+                csv_value(row, "approval_date"),
+            )
+            drug_key = normalize_drug(canonical_drug, synonyms)
+            condition_key = normalize_condition(canonical_condition) if canonical_condition else ""
+            if not drug_key:
+                raise ValueError(f"{path} row {row_number} normalizes to an empty drug key")
+            if require_condition and not condition_key:
+                raise ValueError(f"{path} row {row_number} normalizes to an empty condition key")
+            duplicate_key = (drug_key, condition_key, approval_date)
+            previous_row = seen.get(duplicate_key)
+            if previous_row:
+                raise ValueError(
+                    f"{path} row {row_number} duplicates canonical drug-condition approval "
+                    f"from row {previous_row}: {drug_key!r}, {condition_key!r}, "
+                    f"{approval_date.isoformat()}"
+                )
+            seen[duplicate_key] = row_number
             approvals.append(
                 ApprovalRecord(
-                    drug=drug,
-                    drug_key=normalize_drug(drug, synonyms),
+                    drug=canonical_drug,
+                    drug_key=drug_key,
                     approval_date=approval_date,
-                    application_number=str(row.get("application_number", "")).strip(),
-                    submission_type=str(row.get("submission_type", "CSV")).strip(),
-                    submission_class_code=str(row.get("submission_class_code", "")).strip(),
-                    source=str(row.get("source", "approvals_csv")).strip() or "approvals_csv",
-                    condition=condition,
-                    condition_key=normalize_condition(condition) if condition else "",
+                    application_number=csv_value(row, "application_number"),
+                    submission_type=csv_value(row, "submission_type", "CSV") or "CSV",
+                    submission_class_code=csv_value(row, "submission_class_code"),
+                    source=csv_value(row, "source"),
+                    condition=canonical_condition,
+                    condition_key=condition_key,
                 )
             )
     return approvals
@@ -1263,6 +1406,87 @@ def write_trial_records(path: Path, records: Iterable[TrialRecord]) -> None:
         writer.writerows(rows)
 
 
+def build_drug_standardization_report(
+    records: Iterable[TrialRecord],
+    synonyms: dict[str, str] | None = None,
+) -> list[DrugStandardizationReportRow]:
+    synonym_map = synonyms or {}
+    aliases_by_canonical: dict[str, set[str]] = {}
+    for alias, canonical in synonym_map.items():
+        aliases_by_canonical.setdefault(canonical, set()).add(alias)
+
+    grouped: dict[str, dict[str, Any]] = {}
+    for record in records:
+        group = grouped.setdefault(
+            record.drug_key,
+            {
+                "trial_records": 0,
+                "conditions": set(),
+                "surface_forms": set(),
+                "source_keys": set(),
+            },
+        )
+        group["trial_records"] += 1
+        group["conditions"].add(record.condition_key)
+        if record.drug:
+            group["surface_forms"].add(record.drug)
+            group["source_keys"].add(normalize_drug(record.drug))
+
+    rows: list[DrugStandardizationReportRow] = []
+    for drug_key, group in grouped.items():
+        surface_forms = sorted(group["surface_forms"])
+        source_keys = sorted(group["source_keys"])
+        curated_aliases = sorted(aliases_by_canonical.get(drug_key, set()))
+        has_fragmentation = len(surface_forms) > 1 or len(source_keys) > 1
+        needs_review = has_fragmentation and not curated_aliases
+        if not has_fragmentation and not curated_aliases:
+            continue
+        rows.append(
+            DrugStandardizationReportRow(
+                drug_key=drug_key,
+                trial_records=group["trial_records"],
+                cdps=len(group["conditions"]),
+                unique_surface_forms=len(surface_forms),
+                unique_source_keys=len(source_keys),
+                curated_aliases=";".join(curated_aliases[:20]),
+                sample_surface_forms=";".join(surface_forms[:20]),
+                needs_review=str(needs_review).lower(),
+            )
+        )
+
+    rows.sort(
+        key=lambda row: (
+            row.needs_review != "true",
+            -row.unique_surface_forms,
+            -row.unique_source_keys,
+            -row.trial_records,
+            row.drug_key,
+        )
+    )
+    return rows
+
+
+def write_drug_standardization_report(
+    path: Path,
+    rows: Iterable[DrugStandardizationReportRow],
+) -> None:
+    fieldnames = [
+        "drug_key",
+        "trial_records",
+        "cdps",
+        "unique_surface_forms",
+        "unique_source_keys",
+        "curated_aliases",
+        "sample_surface_forms",
+        "needs_review",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(asdict(row))
+
+
 def print_rates(rows: Iterable[RateRow]) -> None:
     print("metric,successes,failures,ongoing,rate")
     for row in rows:
@@ -1348,7 +1572,13 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         openfda_json_path = None
-    approvals.extend(load_approvals_csv(args.approvals_csv, synonyms))
+    approvals.extend(
+        load_approvals_csv(
+            args.approvals_csv,
+            synonyms,
+            require_condition=args.approval_match == "condition",
+        )
+    )
 
     labels = label_all_cdps(
         records,
@@ -1372,10 +1602,18 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     studies_json_artifact = args.save_studies_json or args.studies_json or ""
+    approvals_csv_path = Path(args.approvals_csv) if args.approvals_csv else None
+    synonyms_csv_path = Path(args.synonyms_csv) if args.synonyms_csv else None
+    standardization_report_path = output_dir / "drug_standardization_report.csv"
+    standardization_report_rows = build_drug_standardization_report(records, synonyms)
 
     write_trial_records(output_dir / "trial_records.csv", records)
     write_csv(output_dir / "phase_labels.csv", labels)
     write_csv(output_dir / "success_rates.csv", rates)
+    write_drug_standardization_report(
+        standardization_report_path,
+        standardization_report_rows,
+    )
     (output_dir / "summary.json").write_text(
         json.dumps(
             {
@@ -1387,6 +1625,8 @@ def main(argv: list[str] | None = None) -> int:
                     "lookback_years": args.lookback_years,
                     "failure_threshold_years": args.failure_threshold_years,
                     "approval_match": args.approval_match,
+                    "approvals_schema_version": APPROVALS_SCHEMA_VERSION,
+                    "synonyms_schema_version": SYNONYMS_SCHEMA_VERSION,
                     "unestimable_phases": sorted(unestimable_phases),
                     "fetch_history_start_date": date_to_string(history_start_date),
                     "max_studies": args.max_studies,
@@ -1413,11 +1653,20 @@ def main(argv: list[str] | None = None) -> int:
                 "artifacts": {
                     "studies_json": studies_json_artifact,
                     "openfda_json": str(openfda_json_path) if openfda_json_path else "",
+                    "approvals_csv": str(approvals_csv_path) if approvals_csv_path else "",
+                    "synonyms_csv": str(synonyms_csv_path) if synonyms_csv_path else "",
+                    "drug_standardization_report": str(standardization_report_path),
                     "studies_json_sha256": file_sha256(Path(studies_json_artifact))
                     if studies_json_artifact and Path(studies_json_artifact).exists()
                     else "",
                     "openfda_json_sha256": file_sha256(openfda_json_path)
                     if openfda_json_path and openfda_json_path.exists()
+                    else "",
+                    "approvals_csv_sha256": file_sha256(approvals_csv_path)
+                    if approvals_csv_path and approvals_csv_path.exists()
+                    else "",
+                    "synonyms_csv_sha256": file_sha256(synonyms_csv_path)
+                    if synonyms_csv_path and synonyms_csv_path.exists()
                     else "",
                 },
                 "studies": len(studies),
@@ -1425,6 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
                 "cdps": len(group_cdps(records)),
                 "approval_records": len(approvals),
                 "condition_specific_approval_records": condition_specific_approval_records,
+                "drug_standardization_report_rows": len(standardization_report_rows),
                 "openfda_conditionless_approval_records": sum(
                     1 for approval in approvals if approval.source == "openFDA Drugs@FDA" and not approval.condition_key
                 ),
@@ -1436,7 +1686,8 @@ def main(argv: list[str] | None = None) -> int:
                     "Failure uses a two-year no-new-trial threshold unless overridden.",
                     "By default, conditionless openFDA approvals are saved as evidence but do not count as CDP successes; use --approval-match drug only for sensitivity analysis.",
                     "When condition-level approval evidence is absent, strict P3SR and OSR are left blank rather than reported as zero.",
-                    "Use --approvals-csv for condition-specific Phase 3 approval labels.",
+                    "Use a version 1 --approvals-csv for condition-specific Phase 3 approval labels.",
+                    "Use a version 1 --synonyms-csv and review drug_standardization_report.csv to reduce unresolved drug-name fragmentation.",
                     "The paper recommends nine-year windows for robust dynamic ClinSR; this run uses the requested five-year window.",
                 ],
             },

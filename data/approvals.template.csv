@@ -1,0 +1,2 @@
+schema_version,drug,canonical_drug,approval_date,condition,canonical_condition,condition_id,application_number,submission_type,submission_class_code,source,reviewed_by,reviewed_at,notes
+1,alemtuzumab,alemtuzumab,2014-11-14,multiple sclerosis,multiple sclerosis,,BLA103948,SUPPL,EFFICACY,manual_fda_label_review,reviewer@example.com,2026-08-31,Example condition-specific approval row; replace with curated source data

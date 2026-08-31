@@ -1,0 +1,2 @@
+schema_version,alias,canonical,entity_type,source,reviewed_by,reviewed_at,notes
+1,NEOD001,birtamimab,drug,manual_registry_review,reviewer@example.com,2026-08-31,Example development-code synonym; replace with curated source data
