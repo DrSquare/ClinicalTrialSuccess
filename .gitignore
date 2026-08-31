@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Large generated data snapshots and row-level exports.
+# These exceed GitHub limits or are too large for normal review.
+output/*.json
+output/trial_records.csv
+output/phase_labels.csv
+output_drug_level_sensitivity/*.json
+output_drug_level_sensitivity/trial_records.csv
+output_drug_level_sensitivity/phase_labels.csv
+
+# Keep compact, reviewable output summaries.
+!output/summary.json
+!output/success_rates.csv
+!output_drug_level_sensitivity/summary.json
+!output_drug_level_sensitivity/success_rates.csv

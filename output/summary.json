@@ -1,0 +1,97 @@
+{
+  "window_start": "2021-08-30",
+  "window_end": "2026-08-30",
+  "retrieved_at_utc": "2026-08-30T23:14:49.472801+00:00",
+  "command_args": [
+    "--start-date",
+    "2021-08-30",
+    "--end-date",
+    "2026-08-30",
+    "--studies-json",
+    "output\\clinicaltrials_studies_history_to_2026-08-30.json",
+    "--output-dir",
+    "output"
+  ],
+  "analysis": {
+    "lookback_years": 5,
+    "failure_threshold_years": 2,
+    "approval_match": "condition",
+    "unestimable_phases": [
+      3
+    ],
+    "fetch_history_start_date": "",
+    "max_studies": null,
+    "page_size": 1000,
+    "orig_only": false
+  },
+  "source": {
+    "clinicaltrials_gov": "https://clinicaltrials.gov/api/v2/studies",
+    "openfda_drugsfda": "https://api.fda.gov/drug/drugsfda.json",
+    "clinicaltrials_query": "AREA[StudyType]INTERVENTIONAL AND (AREA[InterventionType]DRUG OR AREA[InterventionType]BIOLOGICAL OR AREA[InterventionType]GENETIC) AND (AREA[Phase]PHASE1 OR AREA[Phase]PHASE2 OR AREA[Phase]PHASE3) AND AREA[StartDate]RANGE[MIN,2026-08-30]",
+    "openfda_query": "(submissions.submission_status_date:[20210830 TO 20260830]) AND submissions.submission_status:\"AP\" AND (application_number:NDA* OR application_number:BLA*)"
+  },
+  "runtime": {
+    "python": "3.13.3 (tags/v3.13.3:6280bb5, Apr  8 2025, 14:47:33) [MSC v.1943 64 bit (AMD64)]",
+    "pypdf": "6.14.2"
+  },
+  "artifacts": {
+    "studies_json": "output\\clinicaltrials_studies_history_to_2026-08-30.json",
+    "openfda_json": "output\\openfda_drugsfda_2021-08-30_2026-08-30.json",
+    "studies_json_sha256": "ccbe243e691c386780f044d663d24e7b3b76ac17e17b9fb774763b9c23350b50",
+    "openfda_json_sha256": "9ff0f713ca1978331923aa2acce526a07470e6e613950629c24ceb9cfccb4f61"
+  },
+  "studies": 158828,
+  "trial_records": 454435,
+  "cdps": 335908,
+  "approval_records": 4659,
+  "condition_specific_approval_records": 0,
+  "openfda_conditionless_approval_records": 4659,
+  "phase_labels": 212229,
+  "rates": [
+    {
+      "window_start": "2021-08-30",
+      "window_end": "2026-08-30",
+      "metric": "P1SR",
+      "successes": 2774,
+      "failures": 26305,
+      "ongoing": 32423,
+      "rate": 0.095395
+    },
+    {
+      "window_start": "2021-08-30",
+      "window_end": "2026-08-30",
+      "metric": "P2SR",
+      "successes": 1956,
+      "failures": 37955,
+      "ongoing": 73177,
+      "rate": 0.049009
+    },
+    {
+      "window_start": "2021-08-30",
+      "window_end": "2026-08-30",
+      "metric": "P3SR",
+      "successes": 0,
+      "failures": 14347,
+      "ongoing": 23292,
+      "rate": ""
+    },
+    {
+      "window_start": "2021-08-30",
+      "window_end": "2026-08-30",
+      "metric": "OSR",
+      "successes": "",
+      "failures": "",
+      "ongoing": "",
+      "rate": ""
+    }
+  ],
+  "method_notes": [
+    "CDPs are approximated by normalized drug-condition pairs.",
+    "Phase 1/2 is treated as Phase 2; Phase 2/3 is treated as Phase 3.",
+    "Failure uses a two-year no-new-trial threshold unless overridden.",
+    "By default, conditionless openFDA approvals are saved as evidence but do not count as CDP successes; use --approval-match drug only for sensitivity analysis.",
+    "When condition-level approval evidence is absent, strict P3SR and OSR are left blank rather than reported as zero.",
+    "Use --approvals-csv for condition-specific Phase 3 approval labels.",
+    "The paper recommends nine-year windows for robust dynamic ClinSR; this run uses the requested five-year window."
+  ]
+}
