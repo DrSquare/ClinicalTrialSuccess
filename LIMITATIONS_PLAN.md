@@ -5,6 +5,22 @@ feasible with public data and reviewable implementation steps. Priorities 1 and
 2 now have code support in this branch; the remaining unchecked items require
 curated data or later implementation work.
 
+## Progress Snapshot
+
+- Updated: 2026-08-31.
+- Branch: `feature/clinsr-pipeline`.
+- PR: `https://github.com/DrSquare/ClinicalTrialSuccess/pull/1`.
+- Latest progress commit: `c8c22db Implement curated approval and synonym
+  workflows`.
+- Verification completed:
+  - `py -3.13 -m py_compile clinical_trial_success.py tools\convert_pdf_to_markdown.py`
+  - `py -3.13 -m unittest discover -s tests -v`
+  - Result: 18 tests passed.
+- Current state: the pipeline can ingest reviewed condition-specific approvals
+  and reviewed drug synonyms, records input hashes, and emits a drug-name
+  standardization review report. Full strict P3SR/OSR remains blocked on a
+  curated condition-specific FDA approval dataset.
+
 ## Priority 1: Condition-Specific Approval Ground Truth
 
 Build or ingest a condition-specific approval table keyed by normalized drug and
@@ -31,6 +47,21 @@ indication.
     run window.
   - [ ] Re-run strict output with nonblank P3SR/OSR after curated approvals are
     available.
+- Progress details:
+  - Implemented in `clinical_trial_success.py` with
+    `APPROVALS_SCHEMA_VERSION = "1"` and `load_approvals_csv(...)`.
+  - Strict mode now requires `condition` in `--approval-match condition`; rows
+    without indication-level evidence fail validation instead of silently
+    becoming broad drug-level approvals.
+  - Required review metadata now includes `source` and `reviewed_by`; optional
+    `reviewed_at` is date-validated when provided.
+  - Canonical matching uses `canonical_drug` and `canonical_condition` when
+    present, preserving source fields for audit.
+  - Duplicate canonical `(drug_key, condition_key, approval_date)` rows are
+    rejected.
+  - Template saved at `data/approvals.template.csv`.
+  - Tests added for missing strict condition fields, canonical overrides,
+    duplicate approvals, and offline CLI use with curated approval input.
 
 ## Priority 2: Canonical Drug Synonyms
 
@@ -58,6 +89,20 @@ brand names, generic names, and active ingredients.
     reporting.
   - [ ] Populate a comprehensive curated synonym map from FDA labels,
     ClinicalTrials.gov aliases, and external drug databases.
+- Progress details:
+  - Implemented in `clinical_trial_success.py` with
+    `SYNONYMS_SCHEMA_VERSION = "1"` and `load_synonyms(...)`.
+  - Required review metadata now includes `source` and `reviewed_by`; optional
+    `entity_type` is accepted only when blank or `drug`.
+  - Conflicting alias mappings are rejected so a development code cannot point
+    to multiple canonical drugs.
+  - ClinicalTrials.gov `otherNames` remain part of intervention name selection;
+    curated CSV mappings override normalized aliases after extraction.
+  - `drug_standardization_report.csv` is now generated for every run and
+    highlights uncurated high-fragmentation drug-name groups.
+  - Template saved at `data/synonyms.template.csv`.
+  - Tests added for versioned synonym ingestion, conflicting alias rejection,
+    standardization report rows, and end-to-end summary hash metadata.
 
 ## Priority 3: Disease Standardization
 
@@ -115,9 +160,17 @@ Make every output reproducible without live API calls.
 - Impact: Medium-high.
 - Checklist:
   - [ ] Add `--openfda-json` input support.
-  - [x] Record hashes for optional approvals/synonyms CSV inputs.
-  - [ ] Add an offline integration test using small fixture JSON files.
+  - [x] Record hashes for currently supported optional approvals/synonyms CSV
+    inputs.
+  - [x] Add an offline CLI regression test using a small synthetic studies JSON
+    fixture.
   - [ ] Add a `Makefile` or PowerShell task file for standard runs.
+- Progress details:
+  - `summary.json` now records path and SHA-256 hash for `--approvals-csv` and
+    `--synonyms-csv`.
+  - The offline CLI regression test runs with `--studies-json`, `--no-openfda`,
+    `--approvals-csv`, and `--synonyms-csv`, then verifies summary hashes and
+    the generated drug standardization report.
 
 ## Priority 7: Semantic Markdown Conversion
 
